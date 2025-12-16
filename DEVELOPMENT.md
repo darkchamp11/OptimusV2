@@ -1,5 +1,34 @@
 # Optimus Development Guide
 
+## Current Status
+
+**Phase**: Domain Model & Execution Contract ✅  
+**Last Updated**: December 16, 2025
+
+### Completed Milestones
+
+1. ✅ **Workspace Skeleton** — All crates compile
+2. ✅ **Execution Contract** — Domain model frozen in `optimus-common`
+
+### Active Work
+
+**Focus**: Minimal end-to-end flow (Submit → Queue → Dequeue → Acknowledge)
+
+**What's Defined**:
+- Core types: `Language`, `JobRequest`, `JobStatus`, `ExecutionResult`
+- Redis semantics: deterministic queue naming, result storage
+- Configuration: environment-based config with sensible defaults
+
+**What's NOT Implemented Yet**:
+- Docker execution (comes after basic flow works)
+- API handlers (implementing minimal `POST /submit` next)
+- Worker execution loop (implementing `BLPOP` next)
+- Kubernetes/KEDA (comes much later)
+
+See [CONTRACT.md](CONTRACT.md) for the authoritative execution contract.
+
+---
+
 ## Repository Structure
 
 This repository follows a **Cargo workspace** architecture with separate binary and library crates.
