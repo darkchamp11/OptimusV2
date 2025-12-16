@@ -1,3 +1,5 @@
+mod executor;
+
 use optimus_common::redis;
 use optimus_common::types::Language;
 use tokio::signal;
@@ -62,27 +64,39 @@ async fn worker_loop(
                 println!("Timeout: {}ms", job.timeout_ms);
                 println!("Test cases: {}", job.test_cases.len());
                 println!("Source code size: {} bytes", job.source_code.len());
+                println!("═══════════════════════════════════════════");
+                println!();
+                
+                // Execute job with dummy executor
+                let result = executor::execute_dummy(&job);
+                
+                println!();
+                println!("═══════════════════════════════════════════");
+                println!("EXECUTION RESULT");
+                println!("═══════════════════════════════════════════");
+                println!("Job ID: {}", result.job_id);
+                println!("Overall Status: {:?}", result.overall_status);
+                println!("Score: {} / {}", result.score, result.max_score);
                 println!("───────────────────────────────────────────");
                 
-                for (idx, test_case) in job.test_cases.iter().enumerate() {
+                for (idx, test_result) in result.results.iter().enumerate() {
                     println!(
-                        "→ TestCase {} (id: {}, input: {} bytes, expected: {} bytes, weight: {})",
+                        "Test {} (id: {}) → {:?}",
                         idx + 1,
-                        test_case.id,
-                        test_case.input.len(),
-                        test_case.expected_output.len(),
-                        test_case.weight
+                        test_result.test_id,
+                        test_result.status
                     );
+                    println!("  Execution time: {}ms", test_result.execution_time_ms);
+                    if !test_result.stdout.is_empty() {
+                        println!("  Stdout: \"{}\"", test_result.stdout);
+                    }
+                    if !test_result.stderr.is_empty() {
+                        println!("  Stderr: \"{}\"", test_result.stderr);
+                    }
                 }
                 
                 println!("═══════════════════════════════════════════");
                 println!();
-                
-                // No execution yet - just logging
-                // This proves:
-                // 1. Worker receives jobs correctly
-                // 2. Deserialization works
-                // 3. Test case structure is intact
             }
             Ok(None) => {
                 // Timeout - check for shutdown
