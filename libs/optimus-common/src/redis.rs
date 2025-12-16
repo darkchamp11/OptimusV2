@@ -1,4 +1,5 @@
-use crate::types::Language;
+use crate::types::{Language, JobRequest};
+use redis::{AsyncCommands, RedisResult};
 
 /// Redis queue semantics - defines only semantics, not runtime logic
 /// Ensures API and worker never drift, Redis keys are deterministic,
@@ -21,6 +22,39 @@ pub fn result_key(job_id: &uuid::Uuid) -> String {
 /// Generate status key for a job
 pub fn status_key(job_id: &uuid::Uuid) -> String {
     format!("{}:{}", STATUS_PREFIX, job_id)
+}
+
+/// Push a job to the language-specific queue
+/// Uses RPUSH for FIFO semantics
+pub async fn push_job(
+    conn: &mut redis::aio::ConnectionManager,
+    job: &JobRequest,
+) -> RedisResult<()> {
+    let queue = queue_name(&job.language);
+    let payload = serde_json::to_string(job)
+        .map_err(|e| redis::RedisError::from((redis::ErrorKind::TypeError, "serialization error", e.to_string())))?;
+    
+    conn.rpush(&queue, payload).await
+}
+
+/// Pop a job from the language-specific queue
+/// Uses BLPOP with timeout for graceful shutdown
+pub async fn pop_job(
+    conn: &mut redis::aio::ConnectionManager,
+    language: &Language,
+    timeout_seconds: f64,
+) -> RedisResult<Option<JobRequest>> {
+    let queue = queue_name(language);
+    let result: Option<(String, String)> = conn.blpop(&queue, timeout_seconds).await?;
+    
+    match result {
+        Some((_key, payload)) => {
+            let job: JobRequest = serde_json::from_str(&payload)
+                .map_err(|e| redis::RedisError::from((redis::ErrorKind::TypeError, "deserialization error", e.to_string())))?;
+            Ok(Some(job))
+        }
+        None => Ok(None),
+    }
 }
 
 #[cfg(test)]

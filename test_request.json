@@ -1,0 +1,22 @@
+{
+  "language": "python",
+  "source_code": "def factorial(n):\n    if n <= 1:\n        return 1\n    return n * factorial(n - 1)\n\nprint(factorial(int(input())))",
+  "test_cases": [
+    {
+      "input": "5\n",
+      "expected_output": "120\n",
+      "weight": 10
+    },
+    {
+      "input": "3\n",
+      "expected_output": "6\n",
+      "weight": 10
+    },
+    {
+      "input": "0\n",
+      "expected_output": "1\n",
+      "weight": 5
+    }
+  ],
+  "timeout_ms": 5000
+}

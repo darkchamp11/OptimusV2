@@ -1,11 +1,15 @@
-// Router configuration for Optimus API
-// Placeholder for Axum routes
+// Route definitions for the Optimus API
 
-pub fn create_router() {
-    // TODO: Configure Axum router
-    // Routes:
-    // POST /submit - Submit a new job
-    // GET /status/:job_id - Check job status
-    // GET /health - Health check
-    // GET /ready - Readiness probe
+use axum::{
+    routing::{get, post},
+    Router,
+};
+use std::sync::Arc;
+
+use crate::{handlers, AppState};
+
+pub fn routes() -> Router<Arc<AppState>> {
+    Router::new()
+        .route("/execute", post(handlers::submit_job))
+        .route("/health", get(handlers::health_check))
 }
