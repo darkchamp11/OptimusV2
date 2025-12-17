@@ -132,6 +132,9 @@ async fn prepull_image(image: &str) -> anyhow::Result<bool> {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Initialize tracing subscriber
+    // Load environment variables from .env file
+    dotenvy::dotenv().ok();
+    
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()

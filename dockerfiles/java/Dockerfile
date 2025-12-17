@@ -26,4 +26,5 @@ RUN adduser -D -u 1000 optimus && \
 USER optimus
 
 # Minimal entrypoint (no shell overhead)
-ENTRYPOINT ["java", "Runner"]
+# Add / to classpath so Runner.class can be found
+ENTRYPOINT ["java", "-cp", "/:/code", "Runner"]

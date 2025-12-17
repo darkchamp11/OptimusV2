@@ -19,6 +19,9 @@ pub struct AppState {
 
 #[tokio::main]
 async fn main() {
+    // Load environment variables from .env file
+    dotenvy::dotenv().ok();
+    
     // Initialize tracing subscriber
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -77,7 +80,7 @@ async fn main() {
 
     // Start server
     let port = std::env::var("PORT")
-        .unwrap_or_else(|_| "8080".to_string());
+        .unwrap_or_else(|_| "3000".to_string());
     let addr = format!("0.0.0.0:{}", port);
     let listener = TcpListener::bind(&addr).await
         .expect("Failed to bind to address");

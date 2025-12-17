@@ -3,7 +3,7 @@
     {
       "name": "python",
       "version": "3.11",
-      "image": "optimus-python:3.11-v1",
+      "image": "optimus-python:latest",
       "dockerfile_path": "dockerfiles/python/Dockerfile",
       "execution": {
         "command": "python",
@@ -33,7 +33,7 @@
     {
       "name": "java",
       "version": "17",
-      "image": "optimus-java:17-v1",
+      "image": "optimus-java:latest",
       "dockerfile_path": "dockerfiles/java/Dockerfile",
       "execution": {
         "command": "java",

@@ -18,6 +18,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 axum = "0.7"
 hyper = "1.0"
+dotenvy = "0.15"
 
 [dev-dependencies]
 uuid = { version = "1", features = ["v4"] }
