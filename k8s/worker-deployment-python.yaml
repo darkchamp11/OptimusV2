@@ -1,0 +1,91 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: optimus-worker-python
+  namespace: optimus
+  labels:
+    app: optimus-worker-python
+    language: python
+spec:
+  replicas: 0  # KEDA will manage scaling (min: 0, max: 50)
+  selector:
+    matchLabels:
+      app: optimus-worker-python
+      language: python
+  template:
+    metadata:
+      labels:
+        app: optimus-worker-python
+        language: python
+    spec:
+      containers:
+      - name: optimus-worker
+        image: optimus-worker:latest
+        imagePullPolicy: IfNotPresent
+        env:
+        # ===== LANGUAGE BINDING (REQUIRED) =====
+        - name: OPTIMUS_LANGUAGE
+          value: "python"
+        - name: OPTIMUS_QUEUE
+          value: "optimus:queue:python"
+        - name: OPTIMUS_IMAGE
+          value: "optimus-python:3.11-v1"
+        
+        # ===== REDIS CONNECTION =====
+        - name: REDIS_HOST
+          value: "redis:6379"
+        - name: REDIS_URL
+          value: "redis://redis:6379"
+        
+        # ===== LOGGING & OBSERVABILITY =====
+        - name: RUST_LOG
+          value: "info"
+        
+        # ===== DOCKER ENGINE =====
+        - name: DOCKER_HOST
+          value: "unix:///var/run/docker.sock"
+        
+        # ===== CONCURRENCY CONTROL =====
+        - name: OPTIMUS_MAX_PARALLEL_JOBS
+          value: "3"  # Python: moderate parallelism
+        - name: OPTIMUS_MAX_PARALLEL_TESTS
+          value: "5"
+        
+        volumeMounts:
+        - name: docker-sock
+          mountPath: /var/run/docker.sock
+        
+        resources:
+          requests:
+            memory: "512Mi"  # Python: moderate memory
+            cpu: "500m"
+          limits:
+            memory: "2Gi"
+            cpu: "2000m"
+        
+        livenessProbe:
+          exec:
+            command:
+            - /bin/sh
+            - -c
+            - test -S /var/run/docker.sock
+          initialDelaySeconds: 10
+          periodSeconds: 30
+        
+        readinessProbe:
+          exec:
+            command:
+            - /bin/sh
+            - -c
+            - test -S /var/run/docker.sock
+          initialDelaySeconds: 5
+          periodSeconds: 10
+      
+      volumes:
+      - name: docker-sock
+        hostPath:
+          path: /var/run/docker.sock
+          type: Socket
+      
+      # Graceful shutdown
+      terminationGracePeriodSeconds: 300  # 5 minutes for job completion

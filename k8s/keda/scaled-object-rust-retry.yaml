@@ -3,9 +3,11 @@ kind: ScaledObject
 metadata:
   name: optimus-worker-rust-retry-scaler
   namespace: optimus
+  labels:
+    language: rust
 spec:
   scaleTargetRef:
-    name: optimus-worker
+    name: optimus-worker-rust  # Target language-specific deployment
   minReplicaCount: 0
   maxReplicaCount: 5
   pollingInterval: 30

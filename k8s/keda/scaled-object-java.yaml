@@ -3,21 +3,23 @@ kind: ScaledObject
 metadata:
   name: optimus-worker-java-scaler
   namespace: optimus
+  labels:
+    language: java
 spec:
   scaleTargetRef:
-    name: optimus-worker
-  minReplicaCount: 0
-  maxReplicaCount: 10
-  pollingInterval: 15
-  cooldownPeriod: 60
+    name: optimus-worker-java  # Target language-specific deployment
+  minReplicaCount: 0  # Scale to zero when idle
+  maxReplicaCount: 50  # Higher ceiling for production scale
+  pollingInterval: 10  # Poll every 10 seconds
+  cooldownPeriod: 60  # Wait 60s before scaling down
   triggers:
   - type: redis
     metadata:
       # Redis connection
       address: redis:6379
-      # Queue name for Java jobs
+      # Queue name for Java jobs (main queue only)
       listName: optimus:queue:java
-      # Scale up when queue has more than 5 items
-      listLength: "5"
+      # Scale up when queue has 1 or more items
+      listLength: "1"
       # Use password if Redis is secured (optional)
       # passwordFromEnv: REDIS_PASSWORD
