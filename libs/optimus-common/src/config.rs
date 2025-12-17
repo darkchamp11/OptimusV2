@@ -9,6 +9,19 @@ pub struct Config {
     pub max_timeout_ms: u64,
 }
 
+/// Worker concurrency configuration
+/// Controls parallelism to prevent resource oversubscription
+#[derive(Debug, Clone)]
+pub struct WorkerConfig {
+    /// Maximum jobs executing in parallel on this worker
+    /// Default: 1 (safe baseline - predictable resource usage)
+    pub max_parallel_jobs: usize,
+    
+    /// Maximum test cases executing in parallel within a single job
+    /// Default: 1 (strict isolation - sequential execution within job)
+    pub max_parallel_tests: usize,
+}
+
 impl Config {
     pub fn from_env() -> Self {
         Self {
@@ -36,6 +49,31 @@ impl Default for Config {
     }
 }
 
+impl WorkerConfig {
+    pub fn from_env() -> Self {
+        Self {
+            max_parallel_jobs: env::var("MAX_PARALLEL_JOBS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(1),
+            max_parallel_tests: env::var("MAX_PARALLEL_TESTS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(1),
+        }
+    }
+    
+    pub fn new() -> Self {
+        Self::from_env()
+    }
+}
+
+impl Default for WorkerConfig {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -45,5 +83,12 @@ mod tests {
         let config = Config::default();
         assert_eq!(config.default_timeout_ms, 5000);
         assert_eq!(config.max_timeout_ms, 30000);
+    }
+    
+    #[test]
+    fn test_worker_config_defaults() {
+        let config = WorkerConfig::default();
+        assert_eq!(config.max_parallel_jobs, 1);
+        assert_eq!(config.max_parallel_tests, 1);
     }
 }

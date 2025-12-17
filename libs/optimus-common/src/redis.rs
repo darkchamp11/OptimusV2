@@ -9,6 +9,7 @@ pub const QUEUE_PREFIX: &str = "optimus:queue";
 pub const RESULT_PREFIX: &str = "optimus:result";
 pub const STATUS_PREFIX: &str = "optimus:status";
 pub const METRICS_PREFIX: &str = "optimus:metrics";
+pub const CONTROL_PREFIX: &str = "optimus:control";
 
 /// Generate deterministic queue name for a language
 pub fn queue_name(language: &Language) -> String {
@@ -33,6 +34,11 @@ pub fn result_key(job_id: &uuid::Uuid) -> String {
 /// Generate status key for a job
 pub fn status_key(job_id: &uuid::Uuid) -> String {
     format!("{}:{}", STATUS_PREFIX, job_id)
+}
+
+/// Generate control key for a job (cancellation flag)
+pub fn control_key(job_id: &uuid::Uuid) -> String {
+    format!("{}:{}", CONTROL_PREFIX, job_id)
 }
 
 /// Push a job to the language-specific queue
@@ -198,6 +204,39 @@ pub async fn get_result(
             Ok(Some(result))
         }
         None => Ok(None),
+    }
+}
+
+/// Set cancellation flag for a job
+/// TTL of 24 hours to match result expiry
+pub async fn set_job_cancelled(
+    conn: &mut redis::aio::ConnectionManager,
+    job_id: &uuid::Uuid,
+) -> RedisResult<()> {
+    let key = control_key(job_id);
+    let control = crate::types::JobControl { cancelled: true };
+    let payload = serde_json::to_string(&control)
+        .map_err(|e| redis::RedisError::from((redis::ErrorKind::TypeError, "serialization error", e.to_string())))?;
+    
+    // Store with 24-hour TTL
+    conn.set_ex(&key, payload, 86400).await
+}
+
+/// Check if a job has been cancelled
+pub async fn is_job_cancelled(
+    conn: &mut redis::aio::ConnectionManager,
+    job_id: &uuid::Uuid,
+) -> RedisResult<bool> {
+    let key = control_key(job_id);
+    let payload: Option<String> = conn.get(&key).await?;
+    
+    match payload {
+        Some(data) => {
+            let control: crate::types::JobControl = serde_json::from_str(&data)
+                .map_err(|e| redis::RedisError::from((redis::ErrorKind::TypeError, "deserialization error", e.to_string())))?;
+            Ok(control.cancelled)
+        }
+        None => Ok(false),
     }
 }
 

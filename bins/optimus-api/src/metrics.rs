@@ -55,6 +55,13 @@ lazy_static! {
         &["reason"]
     )
     .expect("metric can be created");
+
+    // Jobs cancelled counter
+    pub static ref JOBS_CANCELLED: CounterVec = CounterVec::new(
+        Opts::new("optimus_jobs_cancelled_total", "Total jobs cancelled"),
+        &["source"]
+    )
+    .expect("metric can be created");
 }
 
 /// Initialize metrics registry
@@ -81,6 +88,10 @@ pub fn init_metrics() {
 
     REGISTRY
         .register(Box::new(JOBS_REJECTED.clone()))
+        .expect("collector can be registered");
+
+    REGISTRY
+        .register(Box::new(JOBS_CANCELLED.clone()))
         .expect("collector can be registered");
 }
 
@@ -122,4 +133,9 @@ pub async fn update_queue_depths(redis_conn: &mut redis::aio::ConnectionManager)
                 .set(depth);
         }
     }
+}
+
+/// Record job cancellation
+pub fn record_job_cancelled(source: &str) {
+    JOBS_CANCELLED.with_label_values(&[source]).inc();
 }

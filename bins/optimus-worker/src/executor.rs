@@ -24,7 +24,12 @@ use anyhow::Result;
 /// - DockerEngine runs code in sandboxed containers with language-specific configs
 /// - Evaluator scores outputs
 /// - Results are aggregated
-pub async fn execute_docker(job: &JobRequest, config_manager: &LanguageConfigManager) -> Result<ExecutionResult> {
+/// - Cooperative cancellation is checked between test cases
+pub async fn execute_docker(
+    job: &JobRequest,
+    config_manager: &LanguageConfigManager,
+    redis_conn: &mut redis::aio::ConnectionManager,
+) -> Result<ExecutionResult> {
     println!("→ Starting job execution: {}", job.id);
     println!("  Using: DockerEngine + Evaluator");
     println!();
@@ -32,8 +37,8 @@ pub async fn execute_docker(job: &JobRequest, config_manager: &LanguageConfigMan
     // Step 1: Create Docker engine with config manager
     let engine = DockerEngine::new_with_config(config_manager)?;
 
-    // Step 2: Execute with Docker engine
-    let outputs = execute_job_async(job, &engine).await;
+    // Step 2: Execute with Docker engine (with cancellation support)
+    let outputs = execute_job_async(job, &engine, redis_conn).await;
 
     // Step 3: Evaluate outputs
     let result = evaluator::evaluate(job, outputs);

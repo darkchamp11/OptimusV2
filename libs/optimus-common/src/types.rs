@@ -32,6 +32,19 @@ impl Default for JobMetadata {
     }
 }
 
+/// Job Cancellation Control
+/// Tracks cancellation state for cooperative shutdown
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JobControl {
+    pub cancelled: bool,
+}
+
+impl Default for JobControl {
+    fn default() -> Self {
+        Self { cancelled: false }
+    }
+}
+
 /// Test Case Definition (Immutable Input)
 /// Test cases are immutable - workers must not mutate them
 /// Ordering matters - execution is sequential
@@ -102,6 +115,7 @@ pub enum JobStatus {
     Completed,
     Failed,
     TimedOut,
+    Cancelled,
 }
 
 /// Per-Test Status

@@ -1,0 +1,14 @@
+{
+  "id": "550e8400-e29b-41d4-a716-446655440003",
+  "language": "python",
+  "source_code": "print('hello'\nprint('world')",
+  "test_cases": [
+    {
+      "id": 1,
+      "input": "",
+      "expected_output": "hello\nworld",
+      "weight": 10
+    }
+  ],
+  "timeout_ms": 5000
+}

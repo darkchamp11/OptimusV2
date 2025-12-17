@@ -486,3 +486,105 @@ pub async fn get_job_debug(
     info!(job_id = %job_id, status = %debug_info.status, "Debug info retrieved");
     (StatusCode::OK, Json(debug_info)).into_response()
 }
+
+#[derive(Debug, Serialize)]
+pub struct CancelResponse {
+    pub job_id: String,
+    pub status: String,
+    pub message: String,
+}
+
+/// POST /job/{job_id}/cancel - Cancel a running or queued job
+/// 
+/// Behavior:
+/// - Sets cancellation flag in Redis
+/// - Idempotent (multiple calls are safe)
+/// - Returns 200 OK if cancelled
+/// - Returns 409 Conflict if already completed/failed
+/// - Returns 404 Not Found if job doesn't exist
+pub async fn cancel_job(
+    State(state): State<Arc<AppState>>,
+    Path(job_id): Path<String>,
+) -> impl IntoResponse {
+    // Parse job ID
+    let job_uuid = match Uuid::parse_str(&job_id) {
+        Ok(id) => id,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "Invalid job ID format"
+                })),
+            ).into_response();
+        }
+    };
+
+    let mut conn = state.redis.clone();
+    
+    // Check if job already has a result (completed/failed)
+    match redis::get_result(&mut conn, &job_uuid).await {
+        Ok(Some(result)) => {
+            // Job already completed - cannot cancel
+            let status = match result.overall_status {
+                optimus_common::types::JobStatus::Completed => "completed",
+                optimus_common::types::JobStatus::Failed => "failed",
+                optimus_common::types::JobStatus::TimedOut => "timed_out",
+                optimus_common::types::JobStatus::Cancelled => "cancelled",
+                _ => "finished",
+            };
+            
+            info!(
+                job_id = %job_id,
+                status = ?result.overall_status,
+                "Cannot cancel job - already finished"
+            );
+            
+            return (
+                StatusCode::CONFLICT,
+                Json(CancelResponse {
+                    job_id: job_id.clone(),
+                    status: status.to_string(),
+                    message: format!("Job has already finished with status: {}", status),
+                }),
+            ).into_response();
+        }
+        Ok(None) => {
+            // Job not finished yet - proceed with cancellation
+        }
+        Err(e) => {
+            error!(job_id = %job_id, error = %e, "Failed to check job status");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": format!("Failed to query job: {}", e)
+                })),
+            ).into_response();
+        }
+    }
+    
+    // Set cancellation flag
+    match redis::set_job_cancelled(&mut conn, &job_uuid).await {
+        Ok(_) => {
+            info!(job_id = %job_id, "Job cancellation requested");
+            metrics::record_job_cancelled("user");
+            
+            (
+                StatusCode::OK,
+                Json(CancelResponse {
+                    job_id: job_id.clone(),
+                    status: "cancelling".to_string(),
+                    message: "Job cancellation requested. Worker will stop execution.".to_string(),
+                }),
+            ).into_response()
+        }
+        Err(e) => {
+            error!(job_id = %job_id, error = %e, "Failed to set cancellation flag");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": format!("Failed to cancel job: {}", e)
+                })),
+            ).into_response()
+        }
+    }
+}

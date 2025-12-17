@@ -5,9 +5,38 @@ mod config;
 
 use optimus_common::redis;
 use optimus_common::types::Language;
+use optimus_common::config::WorkerConfig;
 use tokio::signal;
+use tokio::sync::Semaphore;
+use std::sync::Arc;
 use config::LanguageConfigManager;
 use tracing::{info, error, warn, debug, instrument};
+use bollard::{Docker, image::CreateImageOptions};
+use futures_util::stream::StreamExt;
+
+/// Pre-pull a Docker image (best-effort)
+/// Returns Ok(true) if image was pulled, Ok(false) if already present
+async fn prepull_image(image: &str) -> anyhow::Result<bool> {
+    let docker = Docker::connect_with_local_defaults()?;
+    
+    // Check if image exists locally
+    if docker.inspect_image(image).await.is_ok() {
+        return Ok(false); // Already present
+    }
+    
+    // Pull the image
+    let options = Some(CreateImageOptions {
+        from_image: image,
+        ..Default::default()
+    });
+    
+    let mut stream = docker.create_image(options, None, None);
+    while let Some(result) = stream.next().await {
+        result?;
+    }
+    
+    Ok(true) // Successfully pulled
+}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -24,6 +53,14 @@ async fn main() -> anyhow::Result<()> {
 
     info!("Optimus Worker booting...");
 
+    // Load worker concurrency configuration
+    let worker_config = WorkerConfig::from_env();
+    info!(
+        "Worker concurrency config: max_parallel_jobs={}, max_parallel_tests={}",
+        worker_config.max_parallel_jobs,
+        worker_config.max_parallel_tests
+    );
+
     // Load language configurations
     let config_manager = LanguageConfigManager::load_default()
         .map_err(|e| {
@@ -33,6 +70,25 @@ async fn main() -> anyhow::Result<()> {
         })?;
     
     info!("Loaded language configurations for: {:?}", config_manager.list_languages());
+
+    // Pre-pull all language images (best-effort, async, non-blocking)
+    info!("Pre-pulling language images to warm cache...");
+    let prepull_config_manager = config_manager.clone();
+    tokio::spawn(async move {
+        for lang_name in prepull_config_manager.list_languages() {
+            if let Some(lang) = Language::from_str(&lang_name) {
+                if let Ok(image) = prepull_config_manager.get_image(&lang) {
+                    info!("Pre-pulling image: {}", image);
+                    match prepull_image(&image).await {
+                        Ok(true) => info!("✓ Image cached: {}", image),
+                        Ok(false) => info!("✓ Image already present: {}", image),
+                        Err(e) => warn!("⚠ Failed to pre-pull {}: {} (will retry during execution)", image, e),
+                    }
+                }
+            }
+        }
+        info!("✓ Image pre-pull complete");
+    });
 
     // Get language from environment
     let language_str = std::env::var("WORKER_LANGUAGE")
@@ -76,6 +132,11 @@ async fn main() -> anyhow::Result<()> {
     info!("Connected to Redis: {}", redis_url);
     info!("Worker is READY - waiting for jobs from queue: {}", queue_name);
 
+    // Create semaphore for concurrency control
+    // This guarantees at most max_parallel_jobs jobs execute simultaneously
+    let semaphore = Arc::new(Semaphore::new(worker_config.max_parallel_jobs));
+    info!("Concurrency semaphore initialized with {} permits", worker_config.max_parallel_jobs);
+
     // Setup graceful shutdown
     let shutdown = async {
         signal::ctrl_c().await.expect("failed to install CTRL+C signal handler");
@@ -84,7 +145,7 @@ async fn main() -> anyhow::Result<()> {
     };
 
     tokio::select! {
-        _ = worker_loop(&mut redis_conn, &language, &config_manager) => {},
+        _ = worker_loop(&mut redis_conn, &language, &config_manager, semaphore) => {},
         _ = shutdown => {},
     }
 
@@ -92,11 +153,12 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-#[instrument(skip(redis_conn, config_manager), fields(language = %language))]
+#[instrument(skip(redis_conn, config_manager, semaphore), fields(language = %language))]
 async fn worker_loop(
     redis_conn: &mut ::redis::aio::ConnectionManager,
     language: &Language,
     config_manager: &LanguageConfigManager,
+    semaphore: Arc<Semaphore>,
 ) -> anyhow::Result<()> {
     loop {
         // Log idle state (waiting for jobs)
@@ -107,6 +169,13 @@ async fn worker_loop(
         match redis::pop_job_with_retry(redis_conn, language, 5.0).await {
             Ok(Some(mut job)) => {
                 let job_id = job.id;
+                
+                // CRITICAL: Acquire semaphore permit before starting execution
+                // This enforces max_parallel_jobs limit
+                debug!(job_id = %job_id, "Acquiring concurrency permit");
+                let permit = semaphore.clone().acquire_owned().await
+                    .expect("Semaphore should never be closed");
+                
                 info!(
                     job_id = %job_id,
                     language = %job.language,
@@ -114,6 +183,7 @@ async fn worker_loop(
                     test_cases = job.test_cases.len(),
                     source_size = job.source_code.len(),
                     phase = "dequeued",
+                    available_permits = semaphore.available_permits(),
                     "Worker BUSY - processing job"
                 );
                 
@@ -128,6 +198,48 @@ async fn worker_loop(
                     );
                 }
                 
+                // Check for cancellation before starting execution
+                match redis::is_job_cancelled(redis_conn, &job_id).await {
+                    Ok(true) => {
+                        warn!(
+                            job_id = %job_id,
+                            phase = "cancelled_before_execution",
+                            "Job was cancelled before execution started"
+                        );
+                        
+                        // Store cancelled result
+                        let cancelled_result = optimus_common::types::ExecutionResult {
+                            job_id: job.id,
+                            overall_status: optimus_common::types::JobStatus::Cancelled,
+                            score: 0,
+                            max_score: job.test_cases.iter().map(|tc| tc.weight).sum(),
+                            results: vec![],
+                        };
+                        
+                        if let Err(store_err) = redis::store_result_with_metrics(redis_conn, &cancelled_result, &job.language).await {
+                            error!(
+                                job_id = %job_id,
+                                error = %store_err,
+                                "Failed to store cancelled result"
+                            );
+                        } else {
+                            info!(job_id = %job_id, "Cancelled result stored");
+                        }
+                        
+                        continue;
+                    }
+                    Ok(false) => {
+                        // Not cancelled, proceed with execution
+                    }
+                    Err(e) => {
+                        error!(
+                            job_id = %job_id,
+                            error = %e,
+                            "Failed to check cancellation status, proceeding with execution"
+                        );
+                    }
+                }
+                
                 // Execute job with Docker executor
                 info!(
                     job_id = %job_id, 
@@ -137,7 +249,7 @@ async fn worker_loop(
                     "Starting execution"
                 );
                 let start = std::time::Instant::now();
-                let result = match executor::execute_docker(&job, config_manager).await {
+                let result = match executor::execute_docker(&job, config_manager, redis_conn).await {
                     Ok(result) => result,
                     Err(e) => {
                         error!(
@@ -243,7 +355,15 @@ async fn worker_loop(
                     }
                 }
                 
-                info!(job_id = %job_id, phase = "done", "Worker IDLE - job completed");
+                info!(
+                    job_id = %job_id, 
+                    phase = "done", 
+                    available_permits = semaphore.available_permits() + 1,
+                    "Worker IDLE - job completed, permit released"
+                );
+                
+                // Permit is automatically released when dropped here
+                drop(permit);
             }
             Ok(None) => {
                 // Timeout - check for shutdown (idle continues)
