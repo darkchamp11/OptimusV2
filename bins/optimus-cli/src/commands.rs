@@ -1,7 +1,10 @@
 // CLI commands for managing Optimus
 use anyhow::{Context, Result, bail};
+use handlebars::Handlebars;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -10,6 +13,30 @@ pub struct LanguageExecution {
     pub command: String,
     pub args: Vec<String>,
     pub file_extension: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResourceRequests {
+    pub memory: String,
+    pub cpu: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResourceLimits {
+    pub memory: String,
+    pub cpu: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Resources {
+    pub requests: ResourceRequests,
+    pub limits: ResourceLimits,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Concurrency {
+    pub max_parallel_jobs: u32,
+    pub max_parallel_tests: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -22,6 +49,8 @@ pub struct LanguageConfig {
     pub queue_name: String,
     pub memory_limit_mb: u32,
     pub cpu_limit: f32,
+    pub resources: Resources,
+    pub concurrency: Concurrency,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -29,13 +58,38 @@ pub struct LanguagesJson {
     pub languages: Vec<LanguageConfig>,
 }
 
+/// Load languages configuration
+fn load_languages_config() -> Result<LanguagesJson> {
+    let config_path = Path::new("config/languages.json");
+    if !config_path.exists() {
+        return Ok(LanguagesJson { languages: vec![] });
+    }
+
+    let content = fs::read_to_string(config_path)
+        .context("Failed to read languages.json")?;
+    serde_json::from_str(&content)
+        .context("Failed to parse languages.json")
+}
+
+/// Save languages configuration
+fn save_languages_config(config: &LanguagesJson) -> Result<()> {
+    let config_path = Path::new("config/languages.json");
+    
+    // Ensure config directory exists
+    if let Some(parent) = config_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    
+    let json_content = serde_json::to_string_pretty(&config)
+        .context("Failed to serialize languages.json")?;
+    
+    fs::write(config_path, json_content)
+        .context("Failed to write languages.json")?;
+    
+    Ok(())
+}
+
 /// Add a new language to Optimus
-///
-/// This command:
-/// 1. Updates config/languages.json with new language metadata
-/// 2. Generates Dockerfile in dockerfiles/<language>/Dockerfile
-/// 3. Generates KEDA ScaledObject YAML in k8s/keda/scaled-object-<language>.yaml
-/// 4. Creates runner script if needed
 pub async fn add_language(
     name: &str,
     ext: &str,
@@ -54,79 +108,8 @@ pub async fn add_language(
         bail!("Language name and extension cannot be empty");
     }
 
-    // Determine paths
-    let config_path = Path::new("config/languages.json");
-    let dockerfile_dir = PathBuf::from(format!("dockerfiles/{}", name));
-    let dockerfile_path = dockerfile_dir.join("Dockerfile");
-    let keda_path = PathBuf::from(format!("k8s/keda/scaled-object-{}.yaml", name));
-
-    // Step 1: Update languages.json
-    println!("📝 Updating config/languages.json...");
-    update_languages_config(
-        config_path,
-        name,
-        ext,
-        version,
-        command,
-        queue,
-        memory,
-        cpu,
-    )?;
-
-    // Step 2: Generate Dockerfile
-    println!("🐳 Generating Dockerfile...");
-    generate_dockerfile(&dockerfile_path, name, version, base_image)?;
-
-    // Step 3: Generate KEDA ScaledObject
-    println!("📊 Generating KEDA ScaledObject...");
-    generate_keda_scaledobject(&keda_path, name, queue)?;
-
-    // Step 4: Generate runner script if needed
-    if matches!(name, "python" | "java" | "rust" | "cpp" | "go") {
-        println!("📜 Generating runner script...");
-        generate_runner_script(&dockerfile_dir, name)?;
-    }
-
-    println!("✅ Language '{}' added successfully!", name);
-
-    // Step 5: Build Docker image if requested
-    if build_docker {
-        println!("\n🔨 Building Docker image...");
-        build_docker_image(name, false).await?;
-    } else {
-        println!("\n⏭️  Skipping Docker build (use --build-docker=true to build)");
-    }
-
-    println!("\n📋 Next steps:");
-    if !build_docker {
-        println!("  1. Build Docker image: optimus-cli build-image --name {}", name);
-    }
-    println!("  {}. Apply KEDA ScaledObject: kubectl apply -f {}", if build_docker { 1 } else { 2 }, keda_path.display());
-    println!("  {}. Deploy worker for {}: Update worker-deployment.yaml with language filter", if build_docker { 2 } else { 3 }, name);
-
-    Ok(())
-}
-
-/// Update languages.json with new language
-fn update_languages_config(
-    config_path: &Path,
-    name: &str,
-    ext: &str,
-    version: &str,
-    command: Option<&str>,
-    queue: Option<&str>,
-    memory: u32,
-    cpu: f32,
-) -> Result<()> {
-    // Read existing config
-    let mut languages_json: LanguagesJson = if config_path.exists() {
-        let content = fs::read_to_string(config_path)
-            .context("Failed to read languages.json")?;
-        serde_json::from_str(&content)
-            .context("Failed to parse languages.json")?
-    } else {
-        LanguagesJson { languages: vec![] }
-    };
+    // Load existing config
+    let mut languages_json = load_languages_config()?;
 
     // Check if language already exists
     if languages_json.languages.iter().any(|l| l.name == name) {
@@ -135,18 +118,22 @@ fn update_languages_config(
 
     // Determine defaults
     let exec_command = command.unwrap_or(name).to_string();
-    let queue_name = queue.map(|q| q.to_string()).unwrap_or_else(|| format!("jobs:{}", name));
+    let queue_name = queue.map(|q| q.to_string())
+        .unwrap_or_else(|| format!("optimus:queue:{}", name));
     let file_extension = if ext.starts_with('.') {
         ext.to_string()
     } else {
         format!(".{}", ext)
     };
 
+    // Calculate resource allocations
+    let (resources, concurrency) = calculate_resources(memory, cpu);
+
     // Create new language config
     let new_lang = LanguageConfig {
         name: name.to_string(),
         version: version.to_string(),
-        image: format!("optimus-{}:latest", name),
+        image: format!("optimus-{}:{}-v1", name, version),
         dockerfile_path: format!("dockerfiles/{}/Dockerfile", name),
         execution: LanguageExecution {
             command: exec_command,
@@ -156,22 +143,270 @@ fn update_languages_config(
         queue_name,
         memory_limit_mb: memory,
         cpu_limit: cpu,
+        resources,
+        concurrency,
     };
 
     // Add to languages
     languages_json.languages.push(new_lang);
 
-    // Write back to file
-    let json_content = serde_json::to_string_pretty(&languages_json)
-        .context("Failed to serialize languages.json")?;
-    
-    // Ensure config directory exists
-    if let Some(parent) = config_path.parent() {
-        fs::create_dir_all(parent)?;
+    // Save config
+    println!("📝 Updating config/languages.json...");
+    save_languages_config(&languages_json)?;
+
+    // Generate Dockerfile
+    let dockerfile_dir = PathBuf::from(format!("dockerfiles/{}", name));
+    let dockerfile_path = dockerfile_dir.join("Dockerfile");
+    println!("🐳 Generating Dockerfile...");
+    generate_dockerfile(&dockerfile_path, name, version, base_image)?;
+
+    // Generate runner script if needed
+    if matches!(name, "python" | "java" | "rust" | "cpp" | "go") {
+        println!("📜 Generating runner script...");
+        generate_runner_script(&dockerfile_dir, name)?;
     }
-    
-    fs::write(config_path, json_content)
-        .context("Failed to write languages.json")?;
+
+    println!("✅ Language '{}' added successfully!", name);
+
+    // Build Docker image if requested
+    if build_docker {
+        println!("\n🔨 Building Docker image...");
+        build_docker_image(name, false).await?;
+        
+        println!("\n📋 Next steps:");
+        println!("  1. Render K8s manifests: optimus-cli render-k8s");
+        println!("  2. Deploy to cluster: kubectl apply -f k8s/worker-deployment-{}.yaml", name);
+    } else {
+        println!("\n⚠️  Docker image not built - the language won't work until you build it!");
+        println!("\n📋 Next steps:");
+        println!("  1. Build Docker image: optimus-cli build-image --name {}", name);
+        println!("  2. Render K8s manifests: optimus-cli render-k8s");
+        println!("  3. Deploy to cluster: kubectl apply -f k8s/");
+    }
+
+    Ok(())
+}
+
+/// Calculate resource allocations based on memory and CPU
+fn calculate_resources(memory_mb: u32, cpu: f32) -> (Resources, Concurrency) {
+    // Resource requests are 50% of limits
+    let memory_request = format!("{}Mi", memory_mb * 2);
+    let memory_limit = format!("{}Gi", (memory_mb as f32 * 4.0 / 1024.0).ceil() as u32);
+    let cpu_request = format!("{}m", (cpu * 1000.0) as u32);
+    let cpu_limit = format!("{}m", (cpu * 4000.0) as u32);
+
+    let resources = Resources {
+        requests: ResourceRequests {
+            memory: memory_request,
+            cpu: cpu_request,
+        },
+        limits: ResourceLimits {
+            memory: memory_limit,
+            cpu: cpu_limit,
+        },
+    };
+
+    // Concurrency based on memory
+    let concurrency = if memory_mb >= 512 {
+        Concurrency {
+            max_parallel_jobs: 2,
+            max_parallel_tests: 3,
+        }
+    } else {
+        Concurrency {
+            max_parallel_jobs: 3,
+            max_parallel_tests: 5,
+        }
+    };
+
+    (resources, concurrency)
+}
+
+/// Remove a language from Optimus
+pub async fn remove_language(name: &str, yes: bool) -> Result<()> {
+    println!("🗑️  Removing language: {}", name);
+
+    // Load existing config
+    let mut languages_json = load_languages_config()?;
+
+    // Find language
+    let lang_index = languages_json.languages.iter()
+        .position(|l| l.name == name)
+        .ok_or_else(|| anyhow::anyhow!("Language '{}' not found in config", name))?;
+
+    let lang_version = languages_json.languages[lang_index].version.clone();
+    let lang_dockerfile_path = languages_json.languages[lang_index].dockerfile_path.clone();
+
+    // Confirm deletion
+    if !yes {
+        print!("⚠️  This will remove:\n");
+        print!("  - Config entry in languages.json\n");
+        print!("  - Dockerfile at {}\n", lang_dockerfile_path);
+        print!("  - K8s manifests (worker-deployment-{}.yaml, KEDA ScaledObjects)\n", name);
+        print!("\nContinue? (y/N): ");
+        io::stdout().flush()?;
+
+        let mut input = String::new();
+        io::stdin().read_line(&mut input)?;
+        
+        if !input.trim().eq_ignore_ascii_case("y") {
+            println!("❌ Aborted");
+            return Ok(());
+        }
+    }
+
+    // Remove from config
+    languages_json.languages.remove(lang_index);
+    println!("📝 Removing from config/languages.json...");
+    save_languages_config(&languages_json)?;
+
+    // Remove Dockerfile directory
+    let dockerfile_dir = PathBuf::from(format!("dockerfiles/{}", name));
+    if dockerfile_dir.exists() {
+        println!("🐳 Removing {}...", dockerfile_dir.display());
+        fs::remove_dir_all(&dockerfile_dir)
+            .with_context(|| format!("Failed to remove {}", dockerfile_dir.display()))?;
+    }
+
+    // Remove K8s manifests
+    let manifests = vec![
+        format!("k8s/worker-deployment-{}.yaml", name),
+        format!("k8s/keda/scaled-object-{}.yaml", name),
+        format!("k8s/keda/scaled-object-{}-retry.yaml", name),
+    ];
+
+    for manifest_path in manifests {
+        let path = Path::new(&manifest_path);
+        if path.exists() {
+            println!("📊 Removing {}...", manifest_path);
+            fs::remove_file(path)
+                .with_context(|| format!("Failed to remove {}", manifest_path))?;
+        }
+    }
+
+    println!("✅ Language '{}' removed successfully!", name);
+    println!("\n📋 Next steps:");
+    println!("  1. Remove Docker image: docker rmi optimus-{}:{}-v1", name, lang_version);
+    println!("  2. Apply changes to K8s cluster if deployed");
+
+    Ok(())
+}
+
+/// List all configured languages
+pub async fn list_languages() -> Result<()> {
+    let languages_json = load_languages_config()?;
+
+    if languages_json.languages.is_empty() {
+        println!("No languages configured.");
+        println!("\n💡 Add a language with: optimus-cli add-lang --name <name> --ext <ext>");
+        return Ok(());
+    }
+
+    println!("📋 Configured Languages:\n");
+    println!("{:<12} {:<10} {:<30} {:<20} {:<10}",
+             "Name", "Version", "Image", "Queue", "CPU/Mem");
+    println!("{}", "─".repeat(100));
+
+    for lang in &languages_json.languages {
+        println!("{:<12} {:<10} {:<30} {:<20} {:.1}/{} MB",
+                 lang.name,
+                 lang.version,
+                 lang.image,
+                 lang.queue_name,
+                 lang.cpu_limit,
+                 lang.memory_limit_mb);
+    }
+
+    println!("\n✅ Total: {} language(s)", languages_json.languages.len());
+
+    Ok(())
+}
+
+/// Render Kubernetes manifests from templates
+pub async fn render_k8s_manifests(output_dir: Option<&str>) -> Result<()> {
+    println!("📊 Rendering Kubernetes manifests from templates...");
+
+    let languages_json = load_languages_config()?;
+
+    if languages_json.languages.is_empty() {
+        bail!("No languages configured. Add a language first with: optimus-cli add-lang");
+    }
+
+    let output_base = output_dir.unwrap_or("k8s");
+    let output_path = Path::new(output_base);
+    let keda_path = output_path.join("keda");
+
+    // Ensure output directories exist
+    fs::create_dir_all(&output_path)?;
+    fs::create_dir_all(&keda_path)?;
+
+    // Load templates
+    let worker_template = fs::read_to_string("config/templates/worker-deployment.yaml.tmpl")
+        .context("Failed to read worker-deployment.yaml.tmpl")?;
+    let scaledobject_template = fs::read_to_string("config/templates/scaled-object.yaml.tmpl")
+        .context("Failed to read scaled-object.yaml.tmpl")?;
+    let scaledobject_retry_template = fs::read_to_string("config/templates/scaled-object-retry.yaml.tmpl")
+        .context("Failed to read scaled-object-retry.yaml.tmpl")?;
+
+    // Initialize handlebars
+    let mut handlebars = Handlebars::new();
+    handlebars.set_strict_mode(true);
+
+    println!("\n🔧 Generating manifests:");
+
+    for lang in &languages_json.languages {
+        // Prepare template data
+        let mut data = HashMap::new();
+        data.insert("language", &lang.name);
+        data.insert("queue_name", &lang.queue_name);
+        data.insert("image", &lang.image);
+        
+        let memory_request = &lang.resources.requests.memory;
+        let memory_limit = &lang.resources.limits.memory;
+        let cpu_request = &lang.resources.requests.cpu;
+        let cpu_limit = &lang.resources.limits.cpu;
+        
+        data.insert("memory_request", memory_request);
+        data.insert("memory_limit", memory_limit);
+        data.insert("cpu_request", cpu_request);
+        data.insert("cpu_limit", cpu_limit);
+        
+        let max_parallel_jobs = lang.concurrency.max_parallel_jobs.to_string();
+        let max_parallel_tests = lang.concurrency.max_parallel_tests.to_string();
+        
+        data.insert("max_parallel_jobs", &max_parallel_jobs);
+        data.insert("max_parallel_tests", &max_parallel_tests);
+
+        // Render worker deployment
+        let worker_yaml = handlebars.render_template(&worker_template, &data)
+            .context("Failed to render worker-deployment template")?;
+        let worker_path = output_path.join(format!("worker-deployment-{}.yaml", lang.name));
+        fs::write(&worker_path, worker_yaml)
+            .with_context(|| format!("Failed to write {}", worker_path.display()))?;
+        println!("  ✅ {}", worker_path.display());
+
+        // Render KEDA ScaledObject
+        let scaledobject_yaml = handlebars.render_template(&scaledobject_template, &data)
+            .context("Failed to render scaled-object template")?;
+        let scaledobject_path = keda_path.join(format!("scaled-object-{}.yaml", lang.name));
+        fs::write(&scaledobject_path, scaledobject_yaml)
+            .with_context(|| format!("Failed to write {}", scaledobject_path.display()))?;
+        println!("  ✅ {}", scaledobject_path.display());
+
+        // Render KEDA ScaledObject (retry)
+        let scaledobject_retry_yaml = handlebars.render_template(&scaledobject_retry_template, &data)
+            .context("Failed to render scaled-object-retry template")?;
+        let scaledobject_retry_path = keda_path.join(format!("scaled-object-{}-retry.yaml", lang.name));
+        fs::write(&scaledobject_retry_path, scaledobject_retry_yaml)
+            .with_context(|| format!("Failed to write {}", scaledobject_retry_path.display()))?;
+        println!("  ✅ {}", scaledobject_retry_path.display());
+    }
+
+    println!("\n✅ All manifests rendered successfully!");
+    println!("📂 Output directory: {}", output_path.display());
+    println!("\n📋 Next steps:");
+    println!("  1. Review generated manifests");
+    println!("  2. Apply to cluster: kubectl apply -f {}/", output_path.display());
 
     Ok(())
 }
@@ -200,7 +435,8 @@ fn generate_dockerfile(
             let default_base = format!("{}:{}", name, version);
             let base = base_image.unwrap_or(&default_base);
             format!(
-                r#"FROM {}
+                r#"# GENERATED BY optimus-cli — DO NOT EDIT
+FROM {}
 
 WORKDIR /app
 
@@ -224,7 +460,8 @@ CMD ["{}"]
 /// Generate Python Dockerfile
 fn generate_python_dockerfile(version: &str) -> String {
     format!(
-        r#"FROM python:{}
+        r#"# GENERATED BY optimus-cli — DO NOT EDIT
+FROM python:{}
 
 WORKDIR /app
 
@@ -246,7 +483,8 @@ CMD ["python", "/app/runner.py"]
 /// Generate Java Dockerfile
 fn generate_java_dockerfile(version: &str) -> String {
     format!(
-        r#"FROM openjdk:{}
+        r#"# GENERATED BY optimus-cli — DO NOT EDIT
+FROM openjdk:{}
 
 WORKDIR /app
 
@@ -267,7 +505,8 @@ CMD ["java"]
 /// Generate C++ Dockerfile
 fn generate_cpp_dockerfile(version: &str) -> String {
     format!(
-        r#"FROM gcc:{}
+        r#"# GENERATED BY optimus-cli — DO NOT EDIT
+FROM gcc:{}
 
 WORKDIR /app
 
@@ -285,7 +524,8 @@ CMD ["g++"]
 /// Generate Go Dockerfile
 fn generate_go_dockerfile(version: &str) -> String {
     format!(
-        r#"FROM golang:{}
+        r#"# GENERATED BY optimus-cli — DO NOT EDIT
+FROM golang:{}
 
 WORKDIR /app
 
@@ -302,7 +542,8 @@ CMD ["go"]
 /// Generate Node.js Dockerfile
 fn generate_node_dockerfile(version: &str) -> String {
     format!(
-        r#"FROM node:{}
+        r#"# GENERATED BY optimus-cli — DO NOT EDIT
+FROM node:{}
 
 WORKDIR /app
 
@@ -318,7 +559,8 @@ CMD ["node"]
 /// Generate Rust Dockerfile
 fn generate_rust_dockerfile(version: &str) -> String {
     format!(
-        r#"# Rust Execution Environment - Optimized for Code Execution
+        r#"# GENERATED BY optimus-cli — DO NOT EDIT
+# Rust Execution Environment - Optimized for Code Execution
 FROM rust:{}-slim
 
 # Set environment variables for performance
@@ -351,59 +593,13 @@ ENTRYPOINT ["/code/runner.sh"]
     )
 }
 
-/// Generate KEDA ScaledObject YAML
-fn generate_keda_scaledobject(
-    keda_path: &Path,
-    name: &str,
-    queue: Option<&str>,
-) -> Result<()> {
-    // Create directory
-    if let Some(parent) = keda_path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-
-    let default_queue = format!("jobs:{}", name);
-    let queue_name = queue.unwrap_or(&default_queue);
-    let deployment_name = format!("optimus-worker-{}", name);
-
-    let keda_content = format!(
-        r#"apiVersion: keda.sh/v1alpha1
-kind: ScaledObject
-metadata:
-  name: worker-{name}
-  namespace: optimus
-spec:
-  scaleTargetRef:
-    name: {deployment_name}
-  minReplicaCount: 0
-  maxReplicaCount: 10
-  pollingInterval: 5
-  cooldownPeriod: 30
-  triggers:
-    - type: redis
-      metadata:
-        address: redis-master:6379
-        listName: {queue_name}
-        listLength: "1"
-        enableTLS: "false"
-"#,
-        name = name,
-        deployment_name = deployment_name,
-        queue_name = queue_name
-    );
-
-    fs::write(keda_path, keda_content)
-        .context("Failed to write KEDA ScaledObject")?;
-
-    Ok(())
-}
-
 /// Generate language-specific runner script
 fn generate_runner_script(dockerfile_dir: &Path, name: &str) -> Result<()> {
     match name {
         "rust" => {
             let runner_path = dockerfile_dir.join("runner.sh");
             let runner_content = r#"#!/bin/bash
+# GENERATED BY optimus-cli — DO NOT EDIT
 # Optimus Rust Runner
 # Executes Rust code with given input and captures output
 
@@ -441,6 +637,7 @@ echo "$TEST_INPUT" | /code/main
         "python" => {
             let runner_path = dockerfile_dir.join("runner.py");
             let runner_content = r#"#!/usr/bin/env python3
+# GENERATED BY optimus-cli — DO NOT EDIT
 """
 Python Runner for Optimus
 Executes Python code with given input and captures output
@@ -509,6 +706,7 @@ pub async fn init_project(path: &str) -> Result<()> {
     // Create directories
     let dirs = [
         "config",
+        "config/templates",
         "dockerfiles",
         "k8s",
         "k8s/keda",
@@ -533,6 +731,9 @@ pub async fn init_project(path: &str) -> Result<()> {
         println!("  ✅ Created: config/languages.json");
     }
     
+    // Create template files
+    create_template_files(project_path)?;
+    
     println!("✅ Project initialized successfully!");
     println!("\n📋 Next steps:");
     println!("  1. Add a language: optimus-cli add-lang --name python --ext py");
@@ -542,20 +743,43 @@ pub async fn init_project(path: &str) -> Result<()> {
     Ok(())
 }
 
+/// Create template files for K8s manifest generation
+fn create_template_files(project_path: &Path) -> Result<()> {
+    let templates_dir = project_path.join("config/templates");
+    
+    // Worker deployment template
+    let worker_template = include_str!("../../../config/templates/worker-deployment.yaml.tmpl");
+    let worker_path = templates_dir.join("worker-deployment.yaml.tmpl");
+    if !worker_path.exists() {
+        fs::write(&worker_path, worker_template)?;
+        println!("  ✅ Created: config/templates/worker-deployment.yaml.tmpl");
+    }
+    
+    // ScaledObject template
+    let scaledobject_template = include_str!("../../../config/templates/scaled-object.yaml.tmpl");
+    let scaledobject_path = templates_dir.join("scaled-object.yaml.tmpl");
+    if !scaledobject_path.exists() {
+        fs::write(&scaledobject_path, scaledobject_template)?;
+        println!("  ✅ Created: config/templates/scaled-object.yaml.tmpl");
+    }
+    
+    // ScaledObject retry template
+    let scaledobject_retry_template = include_str!("../../../config/templates/scaled-object-retry.yaml.tmpl");
+    let scaledobject_retry_path = templates_dir.join("scaled-object-retry.yaml.tmpl");
+    if !scaledobject_retry_path.exists() {
+        fs::write(&scaledobject_retry_path, scaledobject_retry_template)?;
+        println!("  ✅ Created: config/templates/scaled-object-retry.yaml.tmpl");
+    }
+    
+    Ok(())
+}
+
 /// Build Docker image for a language
 pub async fn build_docker_image(name: &str, no_cache: bool) -> Result<()> {
     println!("🐳 Building Docker image for: {}", name);
     
     // Read languages.json to get version info
-    let config_path = Path::new("config/languages.json");
-    if !config_path.exists() {
-        bail!("config/languages.json not found. Have you added the language yet?");
-    }
-    
-    let content = fs::read_to_string(config_path)
-        .context("Failed to read languages.json")?;
-    let languages_json: LanguagesJson = serde_json::from_str(&content)
-        .context("Failed to parse languages.json")?;
+    let languages_json = load_languages_config()?;
     
     let lang_config = languages_json.languages.iter()
         .find(|l| l.name == name)

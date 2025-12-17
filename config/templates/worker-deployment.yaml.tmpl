@@ -3,17 +3,17 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: optimus-worker-python
+  name: optimus-worker-{{language}}
   namespace: optimus
   labels:
-    app: optimus-worker-python
-    language: python
+    app: optimus-worker-{{language}}
+    language: {{language}}
 spec:
   replicas: 0  # KEDA will manage scaling (min: 0, max: 50)
   selector:
     matchLabels:
-      app: optimus-worker-python
-      language: python
+      app: optimus-worker-{{language}}
+      language: {{language}}
   strategy:
     type: RollingUpdate
     rollingUpdate:
@@ -22,8 +22,8 @@ spec:
   template:
     metadata:
       labels:
-        app: optimus-worker-python
-        language: python
+        app: optimus-worker-{{language}}
+        language: {{language}}
     spec:
       terminationGracePeriodSeconds: 300  # 5 minutes for job completion
       containers:
@@ -36,11 +36,11 @@ spec:
         env:
         # ===== LANGUAGE BINDING (REQUIRED) =====
         - name: OPTIMUS_LANGUAGE
-          value: "python"
+          value: "{{language}}"
         - name: OPTIMUS_QUEUE
-          value: "optimus:queue:python"
+          value: "{{queue_name}}"
         - name: OPTIMUS_IMAGE
-          value: "optimus-python:3.11-v1"
+          value: "{{image}}"
         
         # ===== REDIS CONNECTION =====
         - name: REDIS_HOST
@@ -60,9 +60,9 @@ spec:
         
         # ===== CONCURRENCY CONTROL =====
         - name: OPTIMUS_MAX_PARALLEL_JOBS
-          value: "3"
+          value: "{{max_parallel_jobs}}"
         - name: OPTIMUS_MAX_PARALLEL_TESTS
-          value: "5"
+          value: "{{max_parallel_tests}}"
         
         volumeMounts:
         - name: docker-sock
@@ -70,11 +70,11 @@ spec:
         
         resources:
           requests:
-            memory: "512Mi"
-            cpu: "500m"
+            memory: "{{memory_request}}"
+            cpu: "{{cpu_request}}"
           limits:
-            memory: "2Gi"
-            cpu: "2000m"
+            memory: "{{memory_limit}}"
+            cpu: "{{cpu_limit}}"
         
         livenessProbe:
           httpGet:

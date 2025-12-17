@@ -35,7 +35,7 @@ enum Commands {
         #[arg(short, long)]
         command: Option<String>,
 
-        /// Queue name (defaults to jobs:{language})
+        /// Queue name (defaults to optimus:queue:{language})
         #[arg(short, long)]
         queue: Option<String>,
 
@@ -47,9 +47,30 @@ enum Commands {
         #[arg(long, default_value = "0.5")]
         cpu: f32,
 
-        /// Build Docker image after adding language
-        #[arg(long, default_value = "true")]
-        build_docker: bool,
+        /// Skip Docker image build
+        #[arg(long)]
+        skip_docker: bool,
+    },
+
+    /// Remove a programming language from Optimus
+    RemoveLang {
+        /// Language name to remove
+        #[arg(short, long)]
+        name: String,
+
+        /// Skip confirmation prompt
+        #[arg(short = 'y', long)]
+        yes: bool,
+    },
+
+    /// List all configured languages
+    ListLangs,
+
+    /// Render Kubernetes manifests from templates
+    RenderK8s {
+        /// Output directory for manifests (defaults to k8s/)
+        #[arg(short, long)]
+        output: Option<String>,
     },
 
     /// Build Docker image for a language
@@ -85,7 +106,7 @@ async fn main() -> Result<()> {
             queue,
             memory,
             cpu,
-            build_docker,
+            skip_docker,
         } => {
             commands::add_language(
                 &name,
@@ -96,8 +117,17 @@ async fn main() -> Result<()> {
                 queue.as_deref(),
                 memory,
                 cpu,
-                build_docker,
+                !skip_docker,
             ).await?;
+        }
+        Commands::RemoveLang { name, yes } => {
+            commands::remove_language(&name, yes).await?;
+        }
+        Commands::ListLangs => {
+            commands::list_languages().await?;
+        }
+        Commands::RenderK8s { output } => {
+            commands::render_k8s_manifests(output.as_deref()).await?;
         }
         Commands::BuildImage { name, no_cache } => {
             commands::build_docker_image(&name, no_cache).await?;
