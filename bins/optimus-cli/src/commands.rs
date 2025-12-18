@@ -131,7 +131,7 @@ pub async fn add_language(
     let new_lang = LanguageConfig {
         name: name.to_string(),
         version: version.to_string(),
-        image: format!("optimus-{}:{}-v1", name, version),
+        image: format!("optimus-{}:{}", name, version),
         dockerfile_path: format!("dockerfiles/{}/Dockerfile", name),
         execution: LanguageExecution {
             command: exec_command,
@@ -279,10 +279,40 @@ pub async fn remove_language(name: &str, yes: bool) -> Result<()> {
         }
     }
 
-    println!("✅ Language '{}' removed successfully!", name);
+    // Remove Docker image
+    let image_name = format!("optimus-{}:{}", name, lang_version);
+    println!("🐳 Removing Docker image: {}...", image_name);
+    
+    let docker_result = Command::new("docker")
+        .args(["rmi", "-f", &image_name])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output();
+    
+    match docker_result {
+        Ok(output) => {
+            if output.status.success() {
+                println!("✅ Docker image removed successfully");
+            } else {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                // Don't fail if image doesn't exist
+                if stderr.contains("No such image") {
+                    println!("ℹ️  Docker image not found (may already be removed)");
+                } else {
+                    eprintln!("⚠️  Failed to remove Docker image: {}", stderr.trim());
+                    eprintln!("   You can manually remove it with: docker rmi {}", image_name);
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("⚠️  Docker command failed: {}", e);
+            eprintln!("   You can manually remove the image with: docker rmi {}", image_name);
+        }
+    }
+
+    println!("\n✅ Language '{}' removed successfully!", name);
     println!("\n📋 Next steps:");
-    println!("  1. Remove Docker image: docker rmi optimus-{}:{}-v1", name, lang_version);
-    println!("  2. Apply changes to K8s cluster if deployed");
+    println!("  1. Apply changes to K8s cluster if deployed");
 
     Ok(())
 }
@@ -594,13 +624,10 @@ pub async fn build_docker_image(name: &str, no_cache: bool) -> Result<()> {
         bail!("Dockerfile not found at {}. Generate it first with add-lang command.", dockerfile_path.display());
     }
     
-    // Build image tags
-    let image_versioned = format!("optimus-{}:{}-v1", name, lang_config.version);
-    let image_latest = format!("optimus-{}:latest", name);
+    // Build image tag
+    let image_tag = format!("optimus-{}:{}", name, lang_config.version);
     
-    println!("📦 Building tags:");
-    println!("  - {}", image_versioned);
-    println!("  - {}", image_latest);
+    println!("📦 Building tag: {}", image_tag);
     
     // Use current directory (.) as build context to support both:
     // - COPY dockerfiles/{lang}/file.ext (for manually created Dockerfiles)
@@ -613,9 +640,7 @@ pub async fn build_docker_image(name: &str, no_cache: bool) -> Result<()> {
     let mut docker_args = vec![
         "build".to_string(),
         "-t".to_string(),
-        image_versioned.clone(),
-        "-t".to_string(),
-        image_latest.clone(),
+        image_tag.clone(),
         "-f".to_string(),
         dockerfile_path.to_string_lossy().to_string(),
     ];
@@ -644,14 +669,12 @@ pub async fn build_docker_image(name: &str, no_cache: bool) -> Result<()> {
     
     println!("\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     println!("✅ Docker image built successfully!");
-    println!("\n📦 Available images:");
-    println!("  - {}", image_versioned);
-    println!("  - {}", image_latest);
+    println!("\n📦 Available image: {}", image_tag);
     
-    // Verify images exist
-    println!("\n🔍 Verifying images...");
+    // Verify image exists
+    println!("\n🔍 Verifying image...");
     let verify_status = Command::new("docker")
-        .args(&["images", &image_latest, "--format", "{{.Repository}}:{{.Tag}}"])
+        .args(&["images", &image_tag, "--format", "{{.Repository}}:{{.Tag}}"])
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
         .status();
