@@ -66,13 +66,6 @@ enum Commands {
     /// List all configured languages
     ListLangs,
 
-    /// Render Kubernetes manifests from templates
-    RenderK8s {
-        /// Output directory for manifests (defaults to k8s/)
-        #[arg(short, long)]
-        output: Option<String>,
-    },
-
     /// Build Docker image for a language
     BuildImage {
         /// Language name
@@ -82,13 +75,6 @@ enum Commands {
         /// Skip build cache
         #[arg(long, default_value = "false")]
         no_cache: bool,
-    },
-
-    /// Initialize a new Optimus project
-    Init {
-        /// Project path
-        #[arg(short, long, default_value = ".")]
-        path: String,
     },
 }
 
@@ -126,14 +112,8 @@ async fn main() -> Result<()> {
         Commands::ListLangs => {
             commands::list_languages().await?;
         }
-        Commands::RenderK8s { output } => {
-            commands::render_k8s_manifests(output.as_deref()).await?;
-        }
         Commands::BuildImage { name, no_cache } => {
             commands::build_docker_image(&name, no_cache).await?;
-        }
-        Commands::Init { path } => {
-            commands::init_project(&path).await?;
         }
     }
 

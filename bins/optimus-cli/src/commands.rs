@@ -1,8 +1,6 @@
 // CLI commands for managing Optimus
 use anyhow::{Context, Result, bail};
-use handlebars::Handlebars;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -319,95 +317,6 @@ pub async fn list_languages() -> Result<()> {
     Ok(())
 }
 
-/// Render Kubernetes manifests from templates
-pub async fn render_k8s_manifests(output_dir: Option<&str>) -> Result<()> {
-    println!("📊 Rendering Kubernetes manifests from templates...");
-
-    let languages_json = load_languages_config()?;
-
-    if languages_json.languages.is_empty() {
-        bail!("No languages configured. Add a language first with: optimus-cli add-lang");
-    }
-
-    let output_base = output_dir.unwrap_or("k8s");
-    let output_path = Path::new(output_base);
-    let keda_path = output_path.join("keda");
-
-    // Ensure output directories exist
-    fs::create_dir_all(&output_path)?;
-    fs::create_dir_all(&keda_path)?;
-
-    // Load templates
-    let worker_template = fs::read_to_string("config/templates/worker-deployment.yaml.tmpl")
-        .context("Failed to read worker-deployment.yaml.tmpl")?;
-    let scaledobject_template = fs::read_to_string("config/templates/scaled-object.yaml.tmpl")
-        .context("Failed to read scaled-object.yaml.tmpl")?;
-    let scaledobject_retry_template = fs::read_to_string("config/templates/scaled-object-retry.yaml.tmpl")
-        .context("Failed to read scaled-object-retry.yaml.tmpl")?;
-
-    // Initialize handlebars
-    let mut handlebars = Handlebars::new();
-    handlebars.set_strict_mode(true);
-
-    println!("\n🔧 Generating manifests:");
-
-    for lang in &languages_json.languages {
-        // Prepare template data
-        let mut data = HashMap::new();
-        data.insert("language", &lang.name);
-        data.insert("queue_name", &lang.queue_name);
-        data.insert("image", &lang.image);
-        
-        let memory_request = &lang.resources.requests.memory;
-        let memory_limit = &lang.resources.limits.memory;
-        let cpu_request = &lang.resources.requests.cpu;
-        let cpu_limit = &lang.resources.limits.cpu;
-        
-        data.insert("memory_request", memory_request);
-        data.insert("memory_limit", memory_limit);
-        data.insert("cpu_request", cpu_request);
-        data.insert("cpu_limit", cpu_limit);
-        
-        let max_parallel_jobs = lang.concurrency.max_parallel_jobs.to_string();
-        let max_parallel_tests = lang.concurrency.max_parallel_tests.to_string();
-        
-        data.insert("max_parallel_jobs", &max_parallel_jobs);
-        data.insert("max_parallel_tests", &max_parallel_tests);
-
-        // Render worker deployment
-        let worker_yaml = handlebars.render_template(&worker_template, &data)
-            .context("Failed to render worker-deployment template")?;
-        let worker_path = output_path.join(format!("worker-deployment-{}.yaml", lang.name));
-        fs::write(&worker_path, worker_yaml)
-            .with_context(|| format!("Failed to write {}", worker_path.display()))?;
-        println!("  ✅ {}", worker_path.display());
-
-        // Render KEDA ScaledObject
-        let scaledobject_yaml = handlebars.render_template(&scaledobject_template, &data)
-            .context("Failed to render scaled-object template")?;
-        let scaledobject_path = keda_path.join(format!("scaled-object-{}.yaml", lang.name));
-        fs::write(&scaledobject_path, scaledobject_yaml)
-            .with_context(|| format!("Failed to write {}", scaledobject_path.display()))?;
-        println!("  ✅ {}", scaledobject_path.display());
-
-        // Render KEDA ScaledObject (retry)
-        let scaledobject_retry_yaml = handlebars.render_template(&scaledobject_retry_template, &data)
-            .context("Failed to render scaled-object-retry template")?;
-        let scaledobject_retry_path = keda_path.join(format!("scaled-object-{}-retry.yaml", lang.name));
-        fs::write(&scaledobject_retry_path, scaledobject_retry_yaml)
-            .with_context(|| format!("Failed to write {}", scaledobject_retry_path.display()))?;
-        println!("  ✅ {}", scaledobject_retry_path.display());
-    }
-
-    println!("\n✅ All manifests rendered successfully!");
-    println!("📂 Output directory: {}", output_path.display());
-    println!("\n📋 Next steps:");
-    println!("  1. Review generated manifests");
-    println!("  2. Apply to cluster: kubectl apply -f {}/", output_path.display());
-
-    Ok(())
-}
-
 /// Generate Dockerfile for the language
 fn generate_dockerfile(
     dockerfile_path: &Path,
@@ -665,83 +574,6 @@ ENTRYPOINT ["/runner.sh"]
 "#,
         version
     )
-}
-
-/// Initialize a new Optimus project
-pub async fn init_project(path: &str) -> Result<()> {
-    println!("🚀 Initializing Optimus project at: {}", path);
-    
-    let project_path = Path::new(path);
-    
-    // Create directories
-    let dirs = [
-        "config",
-        "config/templates",
-        "dockerfiles",
-        "k8s",
-        "k8s/keda",
-        "examples",
-    ];
-    
-    for dir in &dirs {
-        let dir_path = project_path.join(dir);
-        fs::create_dir_all(&dir_path)
-            .with_context(|| format!("Failed to create directory: {}", dir))?;
-        println!("  ✅ Created: {}", dir);
-    }
-    
-    // Create default languages.json
-    let languages_json_path = project_path.join("config/languages.json");
-    if !languages_json_path.exists() {
-        let default_config = LanguagesJson {
-            languages: vec![],
-        };
-        let json_content = serde_json::to_string_pretty(&default_config)?;
-        fs::write(languages_json_path, json_content)?;
-        println!("  ✅ Created: config/languages.json");
-    }
-    
-    // Create template files
-    create_template_files(project_path)?;
-    
-    println!("✅ Project initialized successfully!");
-    println!("\n📋 Next steps:");
-    println!("  1. Add a language: optimus-cli add-lang --name python --ext py");
-    println!("  2. Configure Redis and API settings");
-    println!("  3. Deploy to Kubernetes");
-    
-    Ok(())
-}
-
-/// Create template files for K8s manifest generation
-fn create_template_files(project_path: &Path) -> Result<()> {
-    let templates_dir = project_path.join("config/templates");
-    
-    // Worker deployment template
-    let worker_template = include_str!("../../../config/templates/worker-deployment.yaml.tmpl");
-    let worker_path = templates_dir.join("worker-deployment.yaml.tmpl");
-    if !worker_path.exists() {
-        fs::write(&worker_path, worker_template)?;
-        println!("  ✅ Created: config/templates/worker-deployment.yaml.tmpl");
-    }
-    
-    // ScaledObject template
-    let scaledobject_template = include_str!("../../../config/templates/scaled-object.yaml.tmpl");
-    let scaledobject_path = templates_dir.join("scaled-object.yaml.tmpl");
-    if !scaledobject_path.exists() {
-        fs::write(&scaledobject_path, scaledobject_template)?;
-        println!("  ✅ Created: config/templates/scaled-object.yaml.tmpl");
-    }
-    
-    // ScaledObject retry template
-    let scaledobject_retry_template = include_str!("../../../config/templates/scaled-object-retry.yaml.tmpl");
-    let scaledobject_retry_path = templates_dir.join("scaled-object-retry.yaml.tmpl");
-    if !scaledobject_retry_path.exists() {
-        fs::write(&scaledobject_retry_path, scaledobject_retry_template)?;
-        println!("  ✅ Created: config/templates/scaled-object-retry.yaml.tmpl");
-    }
-    
-    Ok(())
 }
 
 /// Build Docker image for a language
